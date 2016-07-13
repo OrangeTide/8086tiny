@@ -1,7 +1,7 @@
 // 8086tiny: a tiny, highly functional, highly portable PC emulator/VM
 // Copyright 2013-14, Adrian Cable (adrian.cable@gmail.com) - http://www.megalith.co.uk/8086tiny
 //
-// Revision 1.25
+// Revision 1.26j
 //
 // This work is licensed under the MIT License. See included LICENSE.TXT.
 
@@ -16,6 +16,7 @@
 
 #ifndef NO_GRAPHICS
 #include "SDL.h"
+#define WINDOW_TITLE "8086tiny v1.25"
 #endif
 
 // Emulator system constants
@@ -140,19 +141,6 @@
 // Reinterpretation cast
 #define CAST(a) *(a*)&
 
-// Keyboard driver for console. This may need changing for UNIX/non-UNIX platforms
-#ifdef _WIN32
-#define KEYBOARD_DRIVER kbhit() && (mem[0x4A6] = getch(), pc_interrupt(7))
-#else
-#define KEYBOARD_DRIVER read(0, mem + 0x4A6, 1) && (int8_asap = (mem[0x4A6] == 0x1B), pc_interrupt(7))
-#endif
-
-// Keyboard driver for SDL
-#ifdef NO_GRAPHICS
-#define SDL_KEYBOARD_DRIVER KEYBOARD_DRIVER
-#else
-#define SDL_KEYBOARD_DRIVER sdl_screen ? SDL_PollEvent(&sdl_event) && (sdl_event.type == SDL_KEYDOWN || sdl_event.type == SDL_KEYUP) && (scratch_uint = sdl_event.key.keysym.unicode, scratch2_uint = sdl_event.key.keysym.mod, CAST(short)mem[0x4A6] = 0x400 + 0x800*!!(scratch2_uint & KMOD_ALT) + 0x1000*!!(scratch2_uint & KMOD_SHIFT) + 0x2000*!!(scratch2_uint & KMOD_CTRL) + 0x4000*(sdl_event.type == SDL_KEYUP) + ((!scratch_uint || scratch_uint > 0x7F) ? sdl_event.key.keysym.sym : scratch_uint), pc_interrupt(7)) : (KEYBOARD_DRIVER)
-#endif
 
 // Global variable definitions
 unsigned char mem[RAM_SIZE], io_ports[IO_PORT_COUNT], *opcode_stream, *regs8, i_rm, i_w, i_reg, i_mod, i_mod_size, i_d, i_reg4bit, raw_opcode_id, xlat_opcode_id, extra, rep_mode, seg_override_en, rep_override_en, trap_flag, int8_asap, scratch_uchar, io_hi_lo, *vid_mem_base, spkr_en, bios_table_lookup[20][256];
@@ -164,6 +152,9 @@ struct timeb ms_clock;
 
 #ifndef NO_GRAPHICS
 SDL_AudioSpec sdl_audio = {44100, AUDIO_U8, 1, 0, 128};
+SDL_Window *sdl_window;
+SDL_Renderer *sdl_renderer;
+SDL_Texture *sdl_tex;
 SDL_Surface *sdl_screen;
 SDL_Event sdl_event;
 unsigned short vid_addr_lookup[VIDEO_RAM_SIZE], cga_colors[4] = {0 /* Black */, 0x1F1F /* Cyan */, 0xE3E3 /* Magenta */, 0xFFFF /* White */};
@@ -238,6 +229,92 @@ char pc_interrupt(unsigned char interrupt_num)
 
 	return regs8[FLAG_TF] = regs8[FLAG_IF] = 0;
 }
+
+static inline void console_keyboard_driver(void)
+{
+#ifdef _WIN32
+	if (kbhit())
+		mem[0x4A6] = getch(), pc_interrupt(7);
+#else
+	if (read(0, mem + 0x4A6, 1))
+		int8_asap = (mem[0x4A6] == 0x1B), pc_interrupt(7);
+#endif
+}
+
+static inline void sdl_keyboard_driver(void)
+{
+	/* TODO: it would be better for the BIOS to accept USB-style scancodes
+	 * from SDL2 and translate them there */
+	static const short sctab[SDL_NUM_SCANCODES] = {
+		[SDL_SCANCODE_A] = 'a',
+		[SDL_SCANCODE_B] = 'b',
+		[SDL_SCANCODE_C] = 'c',
+		[SDL_SCANCODE_D] = 'd',
+		[SDL_SCANCODE_E] = 'e',
+		[SDL_SCANCODE_F] = 'f',
+		[SDL_SCANCODE_G] = 'g',
+		[SDL_SCANCODE_H] = 'h',
+		[SDL_SCANCODE_I] = 'i',
+		[SDL_SCANCODE_J] = 'j',
+		[SDL_SCANCODE_K] = 'k',
+		[SDL_SCANCODE_L] = 'l',
+		[SDL_SCANCODE_M] = 'm',
+		[SDL_SCANCODE_N] = 'n',
+		[SDL_SCANCODE_O] = 'o',
+		[SDL_SCANCODE_P] = 'p',
+		[SDL_SCANCODE_Q] = 'q',
+		[SDL_SCANCODE_R] = 'r',
+		[SDL_SCANCODE_S] = 's',
+		[SDL_SCANCODE_T] = 'y',
+		[SDL_SCANCODE_U] = 'u',
+		[SDL_SCANCODE_V] = 'v',
+		[SDL_SCANCODE_W] = 'w',
+		[SDL_SCANCODE_X] = 'x',
+		[SDL_SCANCODE_Y] = 'y',
+		[SDL_SCANCODE_Z] = 'z',
+		[SDL_SCANCODE_0] = '0',
+		[SDL_SCANCODE_1] = '1',
+		[SDL_SCANCODE_2] = '2',
+		[SDL_SCANCODE_3] = '3',
+		[SDL_SCANCODE_4] = '4',
+		[SDL_SCANCODE_5] = '5',
+		[SDL_SCANCODE_6] = '6',
+		[SDL_SCANCODE_7] = '7',
+		[SDL_SCANCODE_8] = '8',
+		[SDL_SCANCODE_9] = '9',
+		[SDL_SCANCODE_RETURN] = '\r',
+		[SDL_SCANCODE_ESCAPE] = '\033',
+		[SDL_SCANCODE_DELETE] = 127,
+		[SDL_SCANCODE_UP] = 273,
+		[SDL_SCANCODE_DOWN] = 274,
+		[SDL_SCANCODE_RIGHT] = 275,
+		[SDL_SCANCODE_LEFT] = 276,
+		[SDL_SCANCODE_INSERT] = 277,
+		[SDL_SCANCODE_HOME] = 278,
+		[SDL_SCANCODE_END] = 279,
+		[SDL_SCANCODE_PAGEUP] = 280,
+		[SDL_SCANCODE_PAGEDOWN] = 281,
+		// TODO: fill in the remaining keys, or hack the BIOS
+	};
+
+#ifndef NO_GRAPHICS
+	// TODO: need to switch old unicode API to either SDL_TEXTINPUT or hack the BIOS to use keysym ids instead
+	if (sdl_screen) {
+		if (SDL_PollEvent(&sdl_event)) {
+			if (sdl_event.type == SDL_KEYDOWN || sdl_event.type == SDL_KEYUP) {
+				scratch_uint = sctab[sdl_event.key.keysym.scancode], scratch2_uint = sdl_event.key.keysym.mod, CAST(short)mem[0x4A6] = 0x400 + 0x800*!!(scratch2_uint & KMOD_ALT) + 0x1000*!!(scratch2_uint & KMOD_SHIFT) + 0x2000*!!(scratch2_uint & KMOD_CTRL) + 0x4000*(sdl_event.type == SDL_KEYUP) + scratch_uint, pc_interrupt(7);
+			} else if (sdl_event.type == SDL_QUIT) {
+				regs16[REG_CS] = 0;
+				reg_ip = 0;
+			}
+		}
+	} else
+#endif
+	{
+		console_keyboard_driver();
+	}
+}
+
 
 // AAA and AAS instructions - which_operation is +1 for AAA, and -1 for AAS
 int AAA_AAS(char which_operation)
@@ -336,7 +413,7 @@ int main(int argc, char **argv)
 		switch (xlat_opcode_id)
 		{
 			OPCODE_CHAIN 0: // Conditional jump (JAE, JNAE, etc.)
-				// i_w is the invert flag, e.g. i_w == 1 means JNAE, whereas i_w == 0 means JAE 
+				// i_w is the invert flag, e.g. i_w == 1 means JNAE, whereas i_w == 0 means JAE
 				scratch_uchar = raw_opcode_id / 2 & 7;
 				reg_ip += (char)i_data0 * (i_w ^ (regs8[bios_table_lookup[TABLE_COND_JUMP_DECODE_A][scratch_uchar]] || regs8[bios_table_lookup[TABLE_COND_JUMP_DECODE_B][scratch_uchar]] || regs8[bios_table_lookup[TABLE_COND_JUMP_DECODE_C][scratch_uchar]] ^ regs8[bios_table_lookup[TABLE_COND_JUMP_DECODE_D][scratch_uchar]]))
 			OPCODE 1: // MOV reg, imm
@@ -720,9 +797,16 @@ int main(int argc, char **argv)
 						vid_addr_lookup[i] = i / GRAPHICS_X * (GRAPHICS_X / 8) + (i / 2) % (GRAPHICS_X / 8) + 0x2000*(mem[0x4AC] ? (2 * i / GRAPHICS_X) % 2 : (4 * i / GRAPHICS_X) % 4);
 
 					SDL_Init(SDL_INIT_VIDEO);
-					sdl_screen = SDL_SetVideoMode(GRAPHICS_X, GRAPHICS_Y, 8, 0);
-					SDL_EnableUNICODE(1);
-					SDL_EnableKeyRepeat(500, 30);
+					sdl_window = SDL_CreateWindow(WINDOW_TITLE, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, GRAPHICS_X, GRAPHICS_Y, SDL_WINDOW_SHOWN);
+					sdl_renderer = SDL_CreateRenderer(sdl_window, -1, 0);
+					SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+					SDL_SetRenderDrawColor(sdl_renderer, 0, 0, 0, 255);
+					SDL_PixelFormat *fmt = SDL_AllocFormat(SDL_PIXELFORMAT_RGB332);
+					sdl_screen = SDL_CreateRGBSurface(0, GRAPHICS_X, GRAPHICS_Y,
+							fmt->BitsPerPixel, fmt->Rmask, fmt->Gmask, fmt->Bmask, fmt->Amask);
+					SDL_FreeFormat(fmt);
+					sdl_tex = SDL_CreateTexture(sdl_renderer, SDL_PIXELFORMAT_RGB332, SDL_TEXTUREACCESS_STREAMING, GRAPHICS_X, GRAPHICS_Y);
+					// TODO: SDL_EnableKeyRepeat(500, 30);
 				}
 
 				// Refresh SDL display from emulated graphics card video RAM
@@ -730,12 +814,20 @@ int main(int argc, char **argv)
 				for (int i = 0; i < GRAPHICS_X * GRAPHICS_Y / 4; i++)
 					((unsigned *)sdl_screen->pixels)[i] = pixel_colors[15 & (vid_mem_base[vid_addr_lookup[i]] >> 4*!(i & 1))];
 
-				SDL_Flip(sdl_screen);
+				SDL_UpdateTexture(sdl_tex, NULL, sdl_screen->pixels, sdl_screen->pitch);
+				SDL_RenderClear(sdl_renderer);
+				SDL_RenderCopy(sdl_renderer, sdl_tex, NULL, NULL);
+				SDL_RenderPresent(sdl_renderer);
 			}
 			else if (sdl_screen) // Application has gone back to text mode, so close the SDL window
 			{
+				SDL_FreeSurface(sdl_screen);
+				sdl_screen = NULL;
+				SDL_DestroyRenderer(sdl_renderer);
+				sdl_renderer = NULL;
+				SDL_DestroyWindow(sdl_window);
+				sdl_window = NULL;
 				SDL_QuitSubSystem(SDL_INIT_VIDEO);
-				sdl_screen = 0;
 			}
 			SDL_PumpEvents();
 		}
@@ -750,7 +842,7 @@ int main(int argc, char **argv)
 		// If a timer tick is pending, interrupts are enabled, and no overrides/REP are active,
 		// then process the tick and check for new keystrokes
 		if (int8_asap && !seg_override_en && !rep_override_en && regs8[FLAG_IF] && !regs8[FLAG_TF])
-			pc_interrupt(0xA), int8_asap = 0, SDL_KEYBOARD_DRIVER;
+			pc_interrupt(0xA), int8_asap = 0, sdl_keyboard_driver();
 	}
 
 #ifndef NO_GRAPHICS
